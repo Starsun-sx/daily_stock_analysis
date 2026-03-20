@@ -41,6 +41,22 @@ jobs:
       - name: 测试连通性
         run: |
           echo "测试哦"
+          set -eux
+
+          echo "HTTP_PROXY=${HTTP_PROXY:-}"
+          echo "HTTPS_PROXY=${HTTPS_PROXY:-}"
+          echo "NO_PROXY=${NO_PROXY:-}"
+
+          python - <<'PY'
+          import socket
+          print("DNS:", socket.gethostbyname("lyngpt.lynxi.com"))
+          PY
+
+          # 只测连到 443（连不上就会超时/失败）
+          curl -v --connect-timeout 10 --max-time 20 -o /dev/null https://lyngpt.lynxi.com/ || true
+          
+          # 可选：测一下你实际调用的路径（大概率会 404/401，但能证明链路通）
+          curl -v --connect-timeout 10 --max-time 20 -o /dev/null "https://lyngpt.lynxi.com/api/v1/responses" || true
       
       
       - name: 显示运行结果
