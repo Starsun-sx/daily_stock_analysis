@@ -311,10 +311,40 @@ class AgentExecutor:
         skills_section = ""
         if self.skill_instructions:
             skills_section = f"## 激活的交易策略\n\n{self.skill_instructions}"
-        system_prompt = AGENT_SYSTEM_PROMPT.format(skills_section=skills_section)
 
-        # Build tool declarations in OpenAI format (litellm handles all providers)
-        tool_decls = self.tool_registry.to_openai_tools()
+        from src.config import get_config
+        config = get_config()
+        cherry_compat = getattr(config, "openai_cherry_compat", False) or (
+            bool(getattr(config, "openai_base_url", None))
+            and ("lyngpt" in (getattr(config, "openai_base_url", "") or "").lower() or "cherry" in (getattr(config, "openai_base_url", "") or "").lower())
+        )
+
+        if cherry_compat:
+            # Cherry/lyngpt 网关在 /v1/responses 下不支持 LiteLLM tool-calling，
+            # 因此要求模型直接基于已注入数据输出最终仪表盘 JSON。
+            system_prompt = (
+                "你是一位专注于趋势交易的 A 股投资分析 Agent，"
+                "负责生成专业的【决策仪表盘】分析报告。\n\n"
+                "当前你已获得以下结构化数据（由系统注入）："
+                "[实时行情][筹码分布][趋势分析][新闻与舆情情报][基本面信息]。"
+                "请不要调用任何工具，也不要分阶段调用，直接生成最终仪表盘 JSON。\n\n"
+                "## 激活的交易策略\n"
+                f"{self.skill_instructions or ''}\n\n"
+                "## 输出格式：决策仪表盘 JSON\n"
+                "你的最终响应必须是一个有效的决策仪表盘 JSON 对象，字段至少包括："
+                "stock_name、sentiment_score、trend_prediction、operation_advice、decision_type、confidence_level、dashboard、analysis_summary、key_points、risk_warning、buy_reason、trend_analysis。"
+                "\n\n要求：只输出 JSON（禁止使用 ```json 代码块或任何前后文本）。"
+            )
+        else:
+            system_prompt = AGENT_SYSTEM_PROMPT.format(skills_section=skills_section)
+
+        # Cherry/lyngpt 兼容模式下，我们走 /v1/responses（纯字符串 input），
+        # 因此不需要也不应构造 LiteLLM 的 tool declarations（减少体积并避免兼容风险）。
+        if cherry_compat:
+            tool_decls: List[dict] = []
+        else:
+            # Build tool declarations in OpenAI format (litellm handles all providers)
+            tool_decls = self.tool_registry.to_openai_tools()
 
         # Initialize conversation
         messages: List[Dict[str, Any]] = [
@@ -454,8 +484,32 @@ class AgentExecutor:
                 parts.append(f"\n[系统已获取的实时行情]\n{json.dumps(context['realtime_quote'], ensure_ascii=False)}")
             if context.get("chip_distribution"):
                 parts.append(f"\n[系统已获取的筹码分布]\n{json.dumps(context['chip_distribution'], ensure_ascii=False)}")
+            if context.get("trend_result"):
+                parts.append(
+                    "\n[系统已计算的趋势分析结果]\n"
+                    + json.dumps(context["trend_result"], ensure_ascii=False)
+                )
+            if context.get("fundamental_context"):
+                parts.append(
+                    "\n[系统已获取的基本面信息]\n"
+                    + json.dumps(context["fundamental_context"], ensure_ascii=False)
+                )
             if context.get("news_context"):
                 parts.append(f"\n[系统已获取的新闻与舆情情报]\n{context['news_context']}")
 
-        parts.append("\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。")
+        from src.config import get_config
+        config = get_config()
+        cherry_compat = getattr(config, "openai_cherry_compat", False) or (
+            bool(getattr(config, "openai_base_url", None))
+            and ("lyngpt" in (getattr(config, "openai_base_url", "") or "").lower() or "cherry" in (getattr(config, "openai_base_url", "") or "").lower())
+        )
+
+        if cherry_compat:
+            parts.append(
+                "\n请直接基于以上已注入数据输出决策仪表盘 JSON（不需要也不要调用工具）。"
+            )
+        else:
+            parts.append(
+                "\n请使用可用工具获取缺失的数据（如历史K线、新闻等），然后以决策仪表盘 JSON 格式输出分析结果。"
+            )
         return "\n".join(parts)

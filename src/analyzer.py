@@ -22,6 +22,7 @@ from json_repair import repair_json
 from litellm import Router
 
 from src.agent.llm_adapter import get_thinking_extra_body
+from src.cherry_compat import call_cherry_api
 from src.config import (
     Config,
     extra_litellm_params,
@@ -800,6 +801,16 @@ class GeminiAnalyzer:
         models_to_try = [m for m in models_to_try if m]
 
         use_channel_router = self._has_channel_config(config)
+        # 显式 OPENAI_CHERRY_COMPAT=true 或 base_url 含 lyngpt/cherry 时走 Cherry API
+        cherry_compat = getattr(config, "openai_cherry_compat", False) or (
+            bool(config.openai_base_url)
+            and ("lyngpt" in (config.openai_base_url or "").lower() or "cherry" in (config.openai_base_url or "").lower())
+        )
+        if cherry_compat and config.openai_base_url:
+            logger.info(
+                "OPENAI_CHERRY_COMPAT=true，将使用 Cherry/lyngpt 风格 /v1/responses API，base=%s",
+                (config.openai_base_url or "")[:80],
+            )
 
         last_error = None
         for model in models_to_try:
@@ -817,6 +828,32 @@ class GeminiAnalyzer:
                 extra = get_thinking_extra_body(model_short)
                 if extra:
                     call_kwargs["extra_body"] = extra
+
+                # Cherry/lyngpt 风格 API：/v1/responses，input 为纯字符串（优先于 LiteLLM）
+                if (
+                    cherry_compat
+                    and (model.startswith("openai/") or "/" not in model)
+                    and config.openai_base_url
+                ):
+                    keys = get_api_keys_for_model(model, config)
+                    if keys:
+                        try:
+                            logger.info("[Cherry API] 调用 %s @ %s", model, config.openai_base_url)
+                            content, model_used, usage = call_cherry_api(
+                                base_url=config.openai_base_url,
+                                api_key=keys[0],
+                                model=model,
+                                messages=call_kwargs["messages"],
+                                temperature=temperature,
+                                max_tokens=max_tokens,
+                            )
+                            return (content, model_used, usage)
+                        except Exception as e:
+                            logger.warning(f"[Cherry API] {model} failed: {e}")
+                            last_error = e
+                            continue
+                    else:
+                        logger.warning("[Cherry API] OPENAI_CHERRY_COMPAT=true 但未获取到 API Key，将回退 LiteLLM")
 
                 _router_model_names = set(get_configured_llm_models(config.llm_model_list))
                 if use_channel_router and self._router and model in _router_model_names:

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import litellm
 from litellm import Router
 
+from src.cherry_compat import call_cherry_api
 from src.config import (
     extra_litellm_params,
     get_api_keys_for_model,
@@ -286,6 +287,53 @@ class LLMToolAdapter:
     ) -> LLMResponse:
         """Call a specific litellm model with OpenAI-format messages and tools."""
         openai_messages = self._convert_messages(messages)
+
+        # Cherry/lyngpt 兼容模式：不支持 LiteLLM tool-calling（/chat/completions + tools）
+        # 则直接走我们已实现的 /v1/responses（input 为纯字符串）完成“一次性输出”。
+        config = self._config
+        cherry_compat = getattr(config, "openai_cherry_compat", False) or (
+            bool(config.openai_base_url)
+            and ("lyngpt" in (config.openai_base_url or "").lower() or "cherry" in (config.openai_base_url or "").lower())
+        )
+        if cherry_compat and config.openai_base_url:
+            keys = get_api_keys_for_model(model, config)
+            if keys:
+                try:
+                    logger.info(
+                        "[CherryCompat] Agent calling /v1/responses via call_cherry_api: base=%s model=%s",
+                        (config.openai_base_url or "")[:80],
+                        model,
+                    )
+                    content, model_used, usage = call_cherry_api(
+                        base_url=config.openai_base_url,
+                        api_key=keys[0],
+                        model=model,
+                        messages=openai_messages,
+                        temperature=temperature if temperature is not None else config.llm_temperature,
+                        max_tokens=max_tokens or 8192,
+                        timeout=int(timeout or 120),
+                    )
+                    provider_name = model_used.split("/")[0] if "/" in model_used else model_used
+                    return LLMResponse(
+                        content=content,
+                        tool_calls=[],
+                        reasoning_content=None,
+                        usage={
+                            "prompt_tokens": (usage or {}).get("prompt_tokens", 0),
+                            "completion_tokens": (usage or {}).get("completion_tokens", 0),
+                            "total_tokens": (usage or {}).get("total_tokens", 0),
+                        },
+                        provider=provider_name,
+                        model=model,
+                        raw={"provider": "cherry_compat"},
+                    )
+                except Exception as e:
+                    # 回退到 LiteLLM 兼容调用路径（便于排障）
+                    logger.warning(
+                        "[CherryCompat] call_cherry_api failed: %s",
+                        e,
+                        exc_info=True,
+                    )
 
         # Use short model name (without provider prefix) for thinking model lookup
         model_short = model.split("/")[-1] if "/" in model else model

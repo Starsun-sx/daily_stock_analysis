@@ -308,7 +308,7 @@ def setup_env(override: bool = False):
                   Default is False to preserve behavior on initial load where
                   system environment variables take precedence.
     """
-    # src/config.py -> src/ -> root
+    # src/config.py -> src/ -> root（只读 .env，不读 .env.example）
     env_file = os.getenv("ENV_FILE")
     if env_file:
         env_path = Path(env_file)
@@ -387,6 +387,7 @@ class Config:
     openai_model: str = "gpt-4o-mini"  # OpenAI 兼容模型名称
     openai_vision_model: Optional[str] = None  # Deprecated: use VISION_MODEL instead
     openai_temperature: float = 0.7  # OpenAI 温度参数（0.0-2.0，默认0.7）
+    openai_cherry_compat: bool = False  # true 时使用 Cherry/lyngpt 风格 /v1/responses API
 
     # === Vision 配置 ===
     # VISION_MODEL: litellm model string used for image understanding calls.
@@ -983,6 +984,7 @@ class Config:
             openai_model=os.getenv('OPENAI_MODEL', 'gpt-4o-mini'),
             openai_vision_model=os.getenv('OPENAI_VISION_MODEL') or None,
             openai_temperature=float(os.getenv('OPENAI_TEMPERATURE', '0.7')),
+            openai_cherry_compat=parse_env_bool(os.getenv('OPENAI_CHERRY_COMPAT'), False),
             # Vision model: VISION_MODEL > OPENAI_VISION_MODEL (alias) > default
             vision_model=(
                 os.getenv('VISION_MODEL')
